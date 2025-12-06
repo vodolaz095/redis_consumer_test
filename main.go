@@ -14,7 +14,7 @@ import (
 const publishInterval = time.Millisecond
 const consumerLag = 100 * time.Millisecond
 const channelName = "RedisConsumerTest"
-const nConsumers = 10
+const nConsumers = 1
 
 func main() {
 	stopCtx, cancel := stopper.New()
@@ -77,6 +77,7 @@ func main() {
 	if err != nil {
 		log.Printf("eg error: %s", err)
 	}
+	log.Println("===============================================================")
 	log.Println("Приложение остановлено!")
 	log.Printf("Интервал отправки: %s", publishInterval)
 	log.Printf("Задержка обработки: %s", consumerLag)
