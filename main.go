@@ -23,6 +23,7 @@ const nConcurrentConsumers = 10
 const nSharedChannelConsumers = 10
 
 func main() {
+	trigger := make(chan bool, 1)
 	stopCtx, cancel := stopper.New()
 	defer cancel()
 	dsn := os.Getenv("REDIS_URL")
@@ -57,6 +58,10 @@ func main() {
 				if errP != nil {
 					return errP
 				}
+				if nSend == limit/2 {
+					trigger <- true
+				}
+
 				log.Printf("Сообщение %v отправлено", nSend)
 				if nSend == limit {
 					log.Println("Достигнут лимит сообщений")
@@ -151,6 +156,32 @@ func main() {
 			}
 		})
 	}
+
+	var delayedCounter int64
+	// создаём потребителя, который запускается, когда будут отправлены 50% сообщений, в итоге он потеряет более 50% сообщений
+	eg.Go(func() error {
+		<-trigger
+		s := redis.NewClient(opts).Subscribe(ctx, channelName)
+		c := s.Channel(redis.WithChannelSize(bufferSize))
+		defer s.Close()
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("Отложенный потребитель останавливается")
+				return nil
+			case msg := <-c:
+				time.Sleep(consumerLag)
+				atomic.AddInt64(&nReceived, 1)
+				atomic.AddInt64(&delayedCounter, 1)
+				log.Printf("Сообщение %s принято отложенным потребителем", msg.String())
+				if msg.Payload == fmt.Sprintf("%v", limit) {
+					log.Printf("Все сообщения приняты. Отложенный потребитель обработал %v сообщений", delayedCounter)
+					return nil
+				}
+			}
+		}
+	})
+
 	err = eg.Wait()
 	if err != nil {
 		log.Printf("eg error: %s", err)
@@ -165,7 +196,7 @@ func main() {
 	log.Printf("Размер буфера канала : %v", bufferSize)
 	log.Printf("Отправлено сообщений: %v", nSend)
 	log.Printf("Принято всего: %v", nReceived)
-	log.Printf("Должно быть принято: %v", nSend*(nConsumers)+nSend+nSend)
+	log.Printf("Должно быть принято: %v", nSend*(nConsumers)+nSend*3)
 	log.Printf("Доля потерянных сообщений: %.2f%%", 100-(100*float64(nReceived)/float64(nSend*(nConsumers)+nSend+nSend)))
 	for i := range stats {
 		log.Printf("Потребитель %v: принял %v сообщений, доля потерянных сообщений: %.2f%%",
@@ -182,4 +213,7 @@ func main() {
 			i, concurrentChannelStats[i], 100-float64(1000*float64(concurrentChannelStats[i])/float64(nSend)),
 		)
 	}
+	log.Printf("Отложенный потребитель принял %v сообщений, доля потерянных: %.2f%%",
+		delayedCounter, 100-float64(100*float64(delayedCounter)/float64(nSend)),
+	)
 }
