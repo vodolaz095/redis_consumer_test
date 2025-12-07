@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -18,6 +19,8 @@ const channelName = "RedisConsumerTest"
 const nConsumers = 10
 const limit = 1000
 const bufferSize = 10
+const nConcurrentConsumers = 10
+const nSharedChannelConsumers = 10
 
 func main() {
 	stopCtx, cancel := stopper.New()
@@ -29,6 +32,8 @@ func main() {
 	var nSend int64
 	var nReceived int64
 	stats := make([]int64, nConsumers)
+	concurrentStats := make([]int64, nConcurrentConsumers)
+	concurrentChannelStats := make([]int64, nConcurrentConsumers)
 	opts, err := redis.ParseURL(dsn)
 	if err != nil {
 		log.Fatalf("ошибка синтаксиса строки соединения с redis: %s", err)
@@ -62,7 +67,7 @@ func main() {
 	})
 
 	for i := 0; i < nConsumers; i++ {
-		eg.Go(func() error {
+		eg.Go(func() error { // создаём 10 потребителей, каждый из них обладает своим соединением с редис
 			var counter int64
 			s := redis.NewClient(opts).Subscribe(ctx, channelName)
 			c := s.Channel(redis.WithChannelSize(bufferSize))
@@ -86,6 +91,66 @@ func main() {
 			}
 		})
 	}
+
+	sharedChannelClient := redis.NewClient(opts).Subscribe(ctx, channelName)
+	sharedChannel := sharedChannelClient.Channel()
+	defer sharedChannelClient.Close()
+	sharedChannelContext, sharedChannelCancel := context.WithCancel(ctx)
+	// создаём 10 потребителей, каждый из них использует один и тот же клиент и канал подписок
+	for j := 0; j < nSharedChannelConsumers; j++ {
+		eg.Go(func() error {
+			var counter int64
+			for {
+				select {
+				case <-sharedChannelContext.Done():
+					concurrentStats[j] = counter
+					log.Printf("Конкурентный потребитель %v останавливается", j)
+					return nil
+				case msg := <-sharedChannel:
+					time.Sleep(consumerLag)
+					atomic.AddInt64(&nReceived, 1)
+					atomic.AddInt64(&counter, 1)
+					log.Printf("Сообщение %s принято конкурентным потребителем %v", msg.String(), j)
+					if msg.Payload == fmt.Sprintf("%v", limit) {
+						log.Printf("Все сообщения приняты. Конкурентный потребитель %v обработал %v сообщений", j, counter)
+						concurrentStats[j] = counter
+						sharedChannelCancel()
+						return nil
+					}
+				}
+			}
+		})
+	}
+
+	concurrentChannelConsumerClient := redis.NewClient(opts).Subscribe(ctx, channelName)
+	defer concurrentChannelConsumerClient.Close()
+	concurrentChannelContext, concurrentChannelCancel := context.WithCancel(ctx)
+	// создаём 10 потребителей, каждый из них использует одно и тоже соединение, но разные каналы
+	for k := 0; k < nConcurrentConsumers; k++ {
+		eg.Go(func() error {
+			concurrentConsumerChannel := concurrentChannelConsumerClient.Channel()
+			var counter int64
+			for {
+				select {
+				case <-concurrentChannelContext.Done():
+					concurrentChannelStats[k] = counter
+					log.Printf("Конкурентный потребитель %v останавливается", k)
+					return nil
+				case msg := <-concurrentConsumerChannel:
+					time.Sleep(consumerLag)
+					atomic.AddInt64(&nReceived, 1)
+					atomic.AddInt64(&counter, 1)
+					log.Printf("Сообщение %s принято конкурентным потребителем %v", msg.String(), k)
+					if msg.Payload == fmt.Sprintf("%v", limit) {
+						log.Printf("Все сообщения приняты. Конкурентный потребитель %v обработал %v сообщений", k, counter)
+						concurrentChannelStats[k] = counter
+						concurrentChannelCancel()
+						return nil
+					}
+				}
+			}
+		})
+	}
 	err = eg.Wait()
 	if err != nil {
 		log.Printf("eg error: %s", err)
@@ -95,13 +160,26 @@ func main() {
 	log.Printf("Интервал отправки: %s", publishInterval)
 	log.Printf("Задержка обработки: %s", consumerLag)
 	log.Printf("Количество потребителей : %v", nConsumers)
+	log.Printf("Количество конкурентных потребителей с разделённым каналами : %v", nSharedChannelConsumers)
+	log.Printf("Количество конкурентных потребителей с уникальными каналами : %v", nConcurrentConsumers)
 	log.Printf("Размер буфера канала : %v", bufferSize)
-	log.Printf("Отправлено: %v", nSend)
-	log.Printf("Принято: %v", nReceived)
+	log.Printf("Отправлено сообщений: %v", nSend)
+	log.Printf("Принято всего: %v", nReceived)
+	log.Printf("Должно быть принято: %v", nSend*(nConsumers)+nSend+nSend)
+	log.Printf("Доля потерянных сообщений: %.2f%%", 100-(100*float64(nReceived)/float64(nSend*(nConsumers)+nSend+nSend)))
 	for i := range stats {
 		log.Printf("Потребитель %v: принял %v сообщений, доля потерянных сообщений: %.2f%%",
 			i, stats[i], 100-float64(100*float64(stats[i])/float64(nSend)),
 		)
-
+	}
+	for i := range concurrentStats {
+		log.Printf("Конкуренный потребитель на одном канале %v: принял %v сообщений, доля потерянных сообщений: %.2f%%",
+			i, concurrentStats[i], 100-float64(1000*float64(concurrentStats[i])/float64(nSend)),
+		)
+	}
+	for i := range concurrentChannelStats {
+		log.Printf("Конкуренный потребитель с персональным каналом %v: принял %v сообщений, доля потерянных сообщений: %.2f%%",
+			i, concurrentChannelStats[i], 100-float64(1000*float64(concurrentChannelStats[i])/float64(nSend)),
+		)
 	}
 }
