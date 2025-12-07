@@ -197,7 +197,7 @@ func main() {
 	log.Printf("Отправлено сообщений: %v", nSend)
 	log.Printf("Принято всего: %v", nReceived)
 	log.Printf("Должно быть принято: %v", nSend*(nConsumers)+nSend*3)
-	log.Printf("Доля потерянных сообщений: %.2f%%", 100-(100*float64(nReceived)/float64(nSend*(nConsumers)+nSend+nSend)))
+	log.Printf("Доля потерянных сообщений: %.2f%%", 100-(100*float64(nReceived)/float64(nSend*(nConsumers)+3*nSend)))
 	for i := range stats {
 		log.Printf("Потребитель %v: принял %v сообщений, доля потерянных сообщений: %.2f%%",
 			i, stats[i], 100-float64(100*float64(stats[i])/float64(nSend)),
